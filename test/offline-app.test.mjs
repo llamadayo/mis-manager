@@ -7,7 +7,9 @@ import vm from "node:vm";
 const appPath = fileURLToPath(new URL("../public/app.js", import.meta.url));
 
 function createBrowserHarness() {
-  const storage = new Map();
+  const legacyStorage = new Map();
+  const indexedRecords = new Map();
+  const backupWrites = [];
   const appElement = { className: "", innerHTML: "" };
   const document = {
     querySelector(selector) {
@@ -28,17 +30,92 @@ function createBrowserHarness() {
     }
   }
 
+  function requestSuccess(request, value) {
+    setTimeout(() => {
+      request.result = value;
+      request.onsuccess?.();
+    }, 0);
+    return request;
+  }
+
+  function createTransaction() {
+    const transaction = {
+      error: null,
+      oncomplete: null,
+      onerror: null,
+      onabort: null,
+      objectStore() {
+        return {
+          get(key) {
+            return requestSuccess({}, indexedRecords.has(key) ? { key, value: indexedRecords.get(key) } : undefined);
+          },
+          put(record) {
+            indexedRecords.set(record.key, record.value);
+            const request = requestSuccess({}, record.key);
+            setTimeout(() => transaction.oncomplete?.(), 1);
+            return request;
+          }
+        };
+      }
+    };
+    return transaction;
+  }
+
+  const indexedDB = {
+    open() {
+      const database = {
+        objectStoreNames: {
+          contains() {
+            return true;
+          }
+        },
+        createObjectStore() {},
+        transaction() {
+          return createTransaction();
+        }
+      };
+      const request = {};
+      setTimeout(() => {
+        request.result = database;
+        request.onupgradeneeded?.();
+        request.onsuccess?.();
+      }, 0);
+      return request;
+    }
+  };
+
+  const backupHandle = {
+    async queryPermission() {
+      return "granted";
+    },
+    async requestPermission() {
+      return "granted";
+    },
+    async createWritable() {
+      return {
+        async write(content) {
+          backupWrites.push(content);
+        },
+        async close() {}
+      };
+    }
+  };
+
   const context = {
     console,
     document,
     window: {
       localStorage: {
         getItem(key) {
-          return storage.has(key) ? storage.get(key) : null;
+          return legacyStorage.has(key) ? legacyStorage.get(key) : null;
         },
         setItem(key, value) {
-          storage.set(key, String(value));
+          legacyStorage.set(key, String(value));
         }
+      },
+      indexedDB,
+      async showSaveFilePicker() {
+        return backupHandle;
       },
       crypto: {
         randomUUID() {
@@ -78,20 +155,21 @@ function createBrowserHarness() {
   context.globalThis = context;
   vm.createContext(context);
 
-  return { appElement, context, storage };
+  return { appElement, backupWrites, context, indexedRecords, legacyStorage };
 }
 
-test("offline app uses localStorage-backed data flow without fetch", async () => {
+test("offline app uses IndexedDB-backed data flow with JSON backup files", async () => {
   const code = await readFile(appPath, "utf8");
-  const { appElement, context, storage } = createBrowserHarness();
+  const { appElement, backupWrites, context, indexedRecords } = createBrowserHarness();
 
-  vm.runInContext(`${code}\nglobalThis.__misTest = { api, readStore };`, context);
+  vm.runInContext(`${code}\nglobalThis.__misTest = { api, readStore, chooseBackupFile };`, context);
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.match(appElement.innerHTML, /待辦總覽/);
-  assert.equal(storage.has("mis-manager.store.v1"), true);
+  assert.equal(indexedRecords.has("store"), true);
 
   const api = context.__misTest.api;
+  await context.__misTest.chooseBackupFile();
   const system = (
     await api("/api/systems", {
       method: "POST",
@@ -136,6 +214,40 @@ test("offline app uses localStorage-backed data flow without fetch", async () =>
   assert.equal(exported.history.length, 3);
 
   await api("/api/import", { method: "POST", body: exported });
-  const imported = context.__misTest.readStore();
+  const imported = await context.__misTest.readStore();
   assert.equal(imported.tasks[0].title, "檢查備份");
+  assert.ok(backupWrites.length >= 2);
+  assert.match(backupWrites.at(-1), /檢查備份/);
+});
+
+test("offline app migrates existing localStorage data into IndexedDB", async () => {
+  const code = await readFile(appPath, "utf8");
+  const { context, indexedRecords, legacyStorage } = createBrowserHarness();
+
+  legacyStorage.set(
+    "mis-manager.store.v1",
+    JSON.stringify({
+      version: 1,
+      systems: [
+        {
+          id: "sys-legacy",
+          name: "Legacy ERP",
+          description: "",
+          active: true,
+          createdAt: "2026-06-19T00:00:00.000Z",
+          updatedAt: "2026-06-19T00:00:00.000Z"
+        }
+      ],
+      engineers: [],
+      tasks: [],
+      history: []
+    })
+  );
+
+  vm.runInContext(`${code}\nglobalThis.__misTest = { readStore };`, context);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const migrated = await context.__misTest.readStore();
+  assert.equal(migrated.systems[0].name, "Legacy ERP");
+  assert.equal(indexedRecords.get("store").systems[0].id, "sys-legacy");
 });

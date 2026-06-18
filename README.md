@@ -36,19 +36,26 @@ public/
 
 ## 資料儲存
 
-資料儲存在目前瀏覽器的 `localStorage`，不會連線、不會寫入 server，也不會寫入 `data/store.json`。
+主要資料儲存在目前瀏覽器的 `IndexedDB`，不會連線、不會寫入 server，也不會寫入 `data/store.json`。
+
+設定頁提供兩種備份方式：
+
+- `匯出 JSON`：手動下載一份目前資料，可在資料遺失、換電腦或換瀏覽器後重新匯入。
+- `本機備份檔`：若瀏覽器支援 File System Access API，可選擇一個 JSON 檔；之後每次資料變更都會自動覆寫該檔案。
 
 注意事項：
 
 - 同一台電腦換瀏覽器，資料不會自動共用。
 - 清除瀏覽器網站資料可能會刪除待辦資料。
-- 換電腦、重灌或交接前，請先到 `設定` 匯出 JSON 備份。
+- 換電腦、重灌或交接前，請先到 `設定` 匯出 JSON 備份，或確認本機備份檔已更新。
 - 匯入 JSON 會覆蓋目前瀏覽器內的資料。
+- 瀏覽器不支援自動覆寫本機檔案時，仍可使用手動 JSON 匯出與匯入。
 
 ## 技術棧
 
 - 原生 HTML / CSS / JavaScript
-- 瀏覽器 `localStorage`
+- 瀏覽器 `IndexedDB`
+- JSON 檔案匯出 / 匯入
 - 無外部 runtime dependencies
 - 無 CDN、無 npm install、無資料庫
 
@@ -59,7 +66,7 @@ public/
 ├── index.html          # 離線入口，直接用瀏覽器開啟
 ├── public/
 │   ├── index.html      # 靜態目錄入口
-│   ├── app.js          # 原生 JavaScript UI 與本機資料層
+│   ├── app.js          # 原生 JavaScript UI、IndexedDB 與本機備份資料層
 │   └── styles.css      # 深色主題與響應式版面
 ├── src/                # 原本 Node 版 domain/store/http 程式，保留供開發測試參考
 ├── test/               # Node 測試
@@ -72,8 +79,9 @@ public/
 ```mermaid
 flowchart LR
   File["index.html"] --> Browser["瀏覽器 UI<br>public/app.js"]
-  Browser --> Storage["localStorage"]
+  Browser --> Storage["IndexedDB"]
   Browser --> Backup["JSON 匯出 / 匯入"]
+  Browser --> LocalFile["可選本機備份檔"]
 ```
 
 ## 開發檢查
@@ -88,6 +96,6 @@ node --check public/app.js
 ## 已知限制
 
 - 目前沒有登入、權限控管或多人併發處理。
-- 資料綁定目前瀏覽器與目前檔案來源，請依賴 JSON 匯出做備份。
+- 資料綁定目前瀏覽器與目前檔案來源，請依賴 JSON 匯出或本機備份檔做備份。
 - 目前沒有 Email、Teams、瀏覽器通知或排程提醒。
 - 目前沒有外部資料庫、ORM 或 migration 機制。

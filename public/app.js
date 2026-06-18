@@ -2,7 +2,12 @@ const STATUS_OPTIONS = ["待處理", "進行中", "已完成", "暫緩", "取消
 const CLOSED_STATUSES = ["已完成", "暫緩", "取消"];
 const PRIORITY_OPTIONS = ["低", "中", "高", "緊急"];
 const PRIORITY_WEIGHT = { 低: 1, 中: 2, 高: 3, 緊急: 4 };
-const STORE_KEY = "mis-manager.store.v1";
+const LEGACY_STORE_KEY = "mis-manager.store.v1";
+const DB_NAME = "mis-manager";
+const DB_VERSION = 1;
+const DB_STORE = "records";
+const STORE_RECORD_KEY = "store";
+const BACKUP_HANDLE_KEY = "backupFileHandle";
 const STORE_VERSION = 1;
 const HISTORY_FIELDS = ["status", "engineerId", "dueDate"];
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -28,6 +33,7 @@ const state = {
     due: "",
     sort: "dueAsc"
   },
+  backupFileLinked: false,
   toast: null
 };
 
@@ -46,6 +52,7 @@ init();
 
 async function init() {
   try {
+    await initializeStorage();
     await loadAll();
     render();
   } catch (error) {
@@ -454,10 +461,19 @@ function renderSettingsView() {
             匯入 JSON
           </button>
         </section>
+        <section class="setting-block">
+          <h2>本機備份檔</h2>
+          <p>${supportsFileBackups() ? "選擇一個 JSON 檔後，每次資料變更都會同步覆寫該備份檔。" : "目前瀏覽器不支援自動覆寫本機備份檔，請使用手動匯出 JSON。"}</p>
+          <button class="button" id="linkBackupFile" type="button" ${supportsFileBackups() ? "" : "disabled"}>
+            <span class="button-icon" aria-hidden="true">${icons.download}</span>
+            ${state.backupFileLinked ? "更換備份檔" : "選擇備份檔"}
+          </button>
+          <p class="detail-empty">${state.backupFileLinked ? "已連結本機備份檔。若瀏覽器資料遺失，可用該 JSON 檔重新匯入。" : "尚未連結自動備份檔。"}</p>
+        </section>
       </div>
       <section class="panel settings-panel">
         <h2>本機安全邊界</h2>
-        <p class="detail-empty">本模式不連線、不開 server。資料只存在目前瀏覽器的 localStorage，換電腦或換瀏覽器前請先匯出 JSON 備份。</p>
+        <p class="detail-empty">本模式不連線、不開 server。主要資料存在目前瀏覽器的 IndexedDB；清除網站資料仍可能刪除資料，請使用 JSON 匯出或本機備份檔保留可重新匯入的副本。</p>
       </section>
     </section>
   `;
@@ -633,7 +649,7 @@ function bindManagementEvents() {
 function bindSettingsEvents() {
   document.querySelector("#exportData")?.addEventListener("click", async () => {
     await runAction(async () => {
-      const blob = new Blob([`${JSON.stringify(readStore(), null, 2)}\n`], {
+      const blob = new Blob([`${JSON.stringify(await readStore(), null, 2)}\n`], {
         type: "application/json;charset=utf-8"
       });
       const url = URL.createObjectURL(blob);
@@ -643,6 +659,14 @@ function bindSettingsEvents() {
       link.click();
       URL.revokeObjectURL(url);
       showToast("資料已匯出");
+      render();
+    });
+  });
+
+  document.querySelector("#linkBackupFile")?.addEventListener("click", async () => {
+    await runAction(async () => {
+      await chooseBackupFile();
+      showToast("本機備份檔已連結");
       render();
     });
   });
@@ -700,7 +724,7 @@ async function runAction(action) {
 async function api(path, options = {}) {
   const method = options.method ?? "GET";
   const body = options.body ?? {};
-  const store = readStore();
+  const store = await readStore();
 
   if (method === "GET" && path === "/api/tasks") {
     return {
@@ -711,14 +735,14 @@ async function api(path, options = {}) {
 
   if (method === "POST" && path === "/api/tasks") {
     const mutation = createTask(store, body);
-    writeStore(mutation.store);
+    await writeStore(mutation.store);
     return { task: enrichTask(mutation.item, mutation.store) };
   }
 
   if (method === "PUT" && (path === "/api/tasks" || path.startsWith("/api/tasks/"))) {
     const id = path === "/api/tasks" ? body.id : decodeURIComponent(path.slice("/api/tasks/".length));
     const mutation = updateTask(store, id, body);
-    writeStore(mutation.store);
+    await writeStore(mutation.store);
     return {
       task: enrichTask(mutation.item, mutation.store),
       history: mutation.history
@@ -727,7 +751,7 @@ async function api(path, options = {}) {
 
   if (method === "POST" && path === "/api/tasks/batch-status") {
     const mutation = batchUpdateTaskStatus(store, body.ids, body.status);
-    writeStore(mutation.store);
+    await writeStore(mutation.store);
     return {
       changed: mutation.changed,
       tasks: mutation.store.tasks.map((task) => enrichTask(task, mutation.store)),
@@ -741,14 +765,14 @@ async function api(path, options = {}) {
 
   if (method === "POST" && path === "/api/systems") {
     const mutation = createSystem(store, body);
-    writeStore(mutation.store);
+    await writeStore(mutation.store);
     return { system: mutation.item };
   }
 
   if (method === "PUT" && (path === "/api/systems" || path.startsWith("/api/systems/"))) {
     const id = path === "/api/systems" ? body.id : decodeURIComponent(path.slice("/api/systems/".length));
     const mutation = updateSystem(store, id, body);
-    writeStore(mutation.store);
+    await writeStore(mutation.store);
     return { system: mutation.item };
   }
 
@@ -758,7 +782,7 @@ async function api(path, options = {}) {
 
   if (method === "POST" && path === "/api/engineers") {
     const mutation = createEngineer(store, body);
-    writeStore(mutation.store);
+    await writeStore(mutation.store);
     return { engineer: mutation.item };
   }
 
@@ -766,7 +790,7 @@ async function api(path, options = {}) {
     const id =
       path === "/api/engineers" ? body.id : decodeURIComponent(path.slice("/api/engineers/".length));
     const mutation = updateEngineer(store, id, body);
-    writeStore(mutation.store);
+    await writeStore(mutation.store);
     return { engineer: mutation.item };
   }
 
@@ -776,7 +800,7 @@ async function api(path, options = {}) {
 
   if (method === "POST" && path === "/api/import") {
     const imported = normalizeStoreShape(body);
-    writeStore(imported);
+    await writeStore(imported);
     return {
       systems: imported.systems,
       engineers: imported.engineers,
@@ -798,38 +822,170 @@ function emptyStore() {
   };
 }
 
-function readStore() {
-  let raw = null;
+let databasePromise = null;
+let backupFileHandle = null;
 
-  try {
-    raw = window.localStorage.getItem(STORE_KEY);
-  } catch {
-    throw new Error("瀏覽器封鎖本機儲存，無法保存資料");
+async function initializeStorage() {
+  backupFileHandle = await readBackupFileHandle();
+  state.backupFileLinked = Boolean(backupFileHandle);
+  await readStore();
+}
+
+async function readStore() {
+  const stored = await readRecord(STORE_RECORD_KEY);
+
+  if (stored) {
+    return normalizeStoreShape(stored);
   }
 
-  if (!raw) {
-    const store = emptyStore();
-    writeStore(store);
-    return store;
+  const migrated = readLegacyLocalStorage();
+  if (migrated) {
+    await writeStore(migrated);
+    return migrated;
   }
 
+  const store = emptyStore();
+  await writeStore(store);
+  return store;
+}
+
+async function writeStore(store) {
+  const normalized = normalizeStoreShape(store);
+  await writeRecord(STORE_RECORD_KEY, normalized);
+  await writeLinkedBackupFile(normalized);
+  return normalized;
+}
+
+function readLegacyLocalStorage() {
   try {
-    return normalizeStoreShape(JSON.parse(raw));
+    const raw = window.localStorage?.getItem(LEGACY_STORE_KEY);
+    return raw ? normalizeStoreShape(JSON.parse(raw)) : null;
   } catch (error) {
-    throw new Error(`本機資料讀取失敗：${error.message}`);
+    throw new Error(`舊版本機資料讀取失敗：${error.message}`);
   }
 }
 
-function writeStore(store) {
-  const normalized = normalizeStoreShape(store);
-
-  try {
-    window.localStorage.setItem(STORE_KEY, JSON.stringify(normalized));
-  } catch {
-    throw new Error("本機資料儲存失敗，可能是瀏覽器容量不足或封鎖 localStorage");
+function openDatabase() {
+  if (!window.indexedDB) {
+    throw new Error("目前瀏覽器不支援 IndexedDB，無法保存資料");
   }
 
-  return normalized;
+  if (!databasePromise) {
+    databasePromise = new Promise((resolve, reject) => {
+      const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(DB_STORE)) {
+          database.createObjectStore(DB_STORE, { keyPath: "key" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("IndexedDB 開啟失敗"));
+      request.onblocked = () => reject(new Error("IndexedDB 正被其他分頁佔用，請關閉其他分頁後重試"));
+    });
+  }
+
+  return databasePromise;
+}
+
+async function readRecord(key) {
+  const database = await openDatabase();
+  const transaction = database.transaction(DB_STORE, "readonly");
+  const store = transaction.objectStore(DB_STORE);
+  const record = await requestToPromise(store.get(key));
+  return record?.value ?? null;
+}
+
+async function writeRecord(key, value) {
+  const database = await openDatabase();
+  const transaction = database.transaction(DB_STORE, "readwrite");
+  const store = transaction.objectStore(DB_STORE);
+  await requestToPromise(store.put({ key, value }));
+  await transactionToPromise(transaction);
+}
+
+function requestToPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB 操作失敗"));
+  });
+}
+
+function transactionToPromise(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB 交易失敗"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB 交易已取消"));
+  });
+}
+
+function supportsFileBackups() {
+  return typeof window.showSaveFilePicker === "function";
+}
+
+async function chooseBackupFile() {
+  if (!supportsFileBackups()) {
+    throw new Error("目前瀏覽器不支援自動寫入本機備份檔");
+  }
+
+  const handle = await window.showSaveFilePicker({
+    suggestedName: `mis-manager-backup-${today()}.json`,
+    types: [
+      {
+        description: "JSON backup",
+        accept: { "application/json": [".json"] }
+      }
+    ]
+  });
+
+  await writeBackupFile(await readStore(), handle);
+  backupFileHandle = handle;
+  state.backupFileLinked = true;
+  await writeRecord(BACKUP_HANDLE_KEY, handle);
+}
+
+async function readBackupFileHandle() {
+  if (!supportsFileBackups()) {
+    return null;
+  }
+
+  try {
+    return await readRecord(BACKUP_HANDLE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+async function writeLinkedBackupFile(store) {
+  if (!backupFileHandle) {
+    return;
+  }
+
+  try {
+    await writeBackupFile(store, backupFileHandle);
+  } catch (error) {
+    console.warn("本機備份檔寫入失敗", error);
+    backupFileHandle = null;
+    state.backupFileLinked = false;
+    await writeRecord(BACKUP_HANDLE_KEY, null);
+  }
+}
+
+async function writeBackupFile(store, handle) {
+  if (typeof handle.queryPermission === "function") {
+    const permission = await handle.queryPermission({ mode: "readwrite" });
+    if (permission !== "granted") {
+      const requested = await handle.requestPermission({ mode: "readwrite" });
+      if (requested !== "granted") {
+        throw new Error("未取得本機備份檔寫入權限");
+      }
+    }
+  }
+
+  const writable = await handle.createWritable();
+  await writable.write(`${JSON.stringify(normalizeStoreShape(store), null, 2)}\n`);
+  await writable.close();
 }
 
 function normalizeStoreShape(raw) {
