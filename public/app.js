@@ -2,6 +2,15 @@ const STATUS_OPTIONS = ["待處理", "進行中", "已完成", "暫緩", "取消
 const CLOSED_STATUSES = ["已完成", "暫緩", "取消"];
 const PRIORITY_OPTIONS = ["低", "中", "高", "緊急"];
 const PRIORITY_WEIGHT = { 低: 1, 中: 2, 高: 3, 緊急: 4 };
+const LEGACY_STORE_KEY = "mis-manager.store.v1";
+const DB_NAME = "mis-manager";
+const DB_VERSION = 1;
+const DB_STORE = "records";
+const STORE_RECORD_KEY = "store";
+const BACKUP_HANDLE_KEY = "backupFileHandle";
+const STORE_VERSION = 1;
+const HISTORY_FIELDS = ["status", "engineerId", "dueDate"];
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const app = document.querySelector("#app");
 
@@ -24,6 +33,7 @@ const state = {
     due: "",
     sort: "dueAsc"
   },
+  backupFileLinked: false,
   toast: null
 };
 
@@ -42,6 +52,7 @@ init();
 
 async function init() {
   try {
+    await initializeStorage();
     await loadAll();
     render();
   } catch (error) {
@@ -114,7 +125,7 @@ function renderSidebar() {
       </nav>
       <div class="sidebar-foot">
         <strong>本機模式</strong><br>
-        僅綁定 localhost，資料保存在本機 JSON。
+        可直接開啟 index.html，資料保存在瀏覽器本機儲存。
       </div>
     </aside>
   `;
@@ -450,10 +461,19 @@ function renderSettingsView() {
             匯入 JSON
           </button>
         </section>
+        <section class="setting-block">
+          <h2>本機備份檔</h2>
+          <p>${supportsFileBackups() ? "選擇一個 JSON 檔後，每次資料變更都會同步覆寫該備份檔。" : "目前瀏覽器不支援自動覆寫本機備份檔，請使用手動匯出 JSON。"}</p>
+          <button class="button" id="linkBackupFile" type="button" ${supportsFileBackups() ? "" : "disabled"}>
+            <span class="button-icon" aria-hidden="true">${icons.download}</span>
+            ${state.backupFileLinked ? "更換備份檔" : "選擇備份檔"}
+          </button>
+          <p class="detail-empty">${state.backupFileLinked ? "已連結本機備份檔。若瀏覽器資料遺失，可用該 JSON 檔重新匯入。" : "尚未連結自動備份檔。"}</p>
+        </section>
       </div>
       <section class="panel settings-panel">
         <h2>本機安全邊界</h2>
-        <p class="detail-empty">Server 綁定 127.0.0.1，資料檔位於 data/store.json，第一版不提供登入與內網存取。</p>
+        <p class="detail-empty">本模式不連線、不開 server。主要資料存在目前瀏覽器的 IndexedDB；清除網站資料仍可能刪除資料，請使用 JSON 匯出或本機備份檔保留可重新匯入的副本。</p>
       </section>
     </section>
   `;
@@ -629,12 +649,9 @@ function bindManagementEvents() {
 function bindSettingsEvents() {
   document.querySelector("#exportData")?.addEventListener("click", async () => {
     await runAction(async () => {
-      const response = await fetch("/api/export");
-      if (!response.ok) {
-        throw new Error("匯出失敗");
-      }
-
-      const blob = await response.blob();
+      const blob = new Blob([`${JSON.stringify(await readStore(), null, 2)}\n`], {
+        type: "application/json;charset=utf-8"
+      });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -642,6 +659,14 @@ function bindSettingsEvents() {
       link.click();
       URL.revokeObjectURL(url);
       showToast("資料已匯出");
+      render();
+    });
+  });
+
+  document.querySelector("#linkBackupFile")?.addEventListener("click", async () => {
+    await runAction(async () => {
+      await chooseBackupFile();
+      showToast("本機備份檔已連結");
       render();
     });
   });
@@ -697,20 +722,737 @@ async function runAction(action) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    method: options.method ?? "GET",
-    headers: options.body ? { "Content-Type": "application/json" } : undefined,
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
+  const method = options.method ?? "GET";
+  const body = options.body ?? {};
+  const store = await readStore();
 
-  const contentType = response.headers.get("content-type") ?? "";
-  const payload = contentType.includes("application/json") ? await response.json() : null;
-
-  if (!response.ok) {
-    throw new Error(payload?.error ?? `HTTP ${response.status}`);
+  if (method === "GET" && path === "/api/tasks") {
+    return {
+      tasks: store.tasks.map((task) => enrichTask(task, store)),
+      history: store.history
+    };
   }
 
-  return payload;
+  if (method === "POST" && path === "/api/tasks") {
+    const mutation = createTask(store, body);
+    await writeStore(mutation.store);
+    return { task: enrichTask(mutation.item, mutation.store) };
+  }
+
+  if (method === "PUT" && (path === "/api/tasks" || path.startsWith("/api/tasks/"))) {
+    const id = path === "/api/tasks" ? body.id : decodeURIComponent(path.slice("/api/tasks/".length));
+    const mutation = updateTask(store, id, body);
+    await writeStore(mutation.store);
+    return {
+      task: enrichTask(mutation.item, mutation.store),
+      history: mutation.history
+    };
+  }
+
+  if (method === "POST" && path === "/api/tasks/batch-status") {
+    const mutation = batchUpdateTaskStatus(store, body.ids, body.status);
+    await writeStore(mutation.store);
+    return {
+      changed: mutation.changed,
+      tasks: mutation.store.tasks.map((task) => enrichTask(task, mutation.store)),
+      history: mutation.store.history
+    };
+  }
+
+  if (method === "GET" && path === "/api/systems") {
+    return { systems: store.systems };
+  }
+
+  if (method === "POST" && path === "/api/systems") {
+    const mutation = createSystem(store, body);
+    await writeStore(mutation.store);
+    return { system: mutation.item };
+  }
+
+  if (method === "PUT" && (path === "/api/systems" || path.startsWith("/api/systems/"))) {
+    const id = path === "/api/systems" ? body.id : decodeURIComponent(path.slice("/api/systems/".length));
+    const mutation = updateSystem(store, id, body);
+    await writeStore(mutation.store);
+    return { system: mutation.item };
+  }
+
+  if (method === "GET" && path === "/api/engineers") {
+    return { engineers: store.engineers };
+  }
+
+  if (method === "POST" && path === "/api/engineers") {
+    const mutation = createEngineer(store, body);
+    await writeStore(mutation.store);
+    return { engineer: mutation.item };
+  }
+
+  if (method === "PUT" && (path === "/api/engineers" || path.startsWith("/api/engineers/"))) {
+    const id =
+      path === "/api/engineers" ? body.id : decodeURIComponent(path.slice("/api/engineers/".length));
+    const mutation = updateEngineer(store, id, body);
+    await writeStore(mutation.store);
+    return { engineer: mutation.item };
+  }
+
+  if (method === "GET" && path === "/api/export") {
+    return store;
+  }
+
+  if (method === "POST" && path === "/api/import") {
+    const imported = normalizeStoreShape(body);
+    await writeStore(imported);
+    return {
+      systems: imported.systems,
+      engineers: imported.engineers,
+      tasks: imported.tasks.map((task) => enrichTask(task, imported)),
+      history: imported.history
+    };
+  }
+
+  throw createInputError("找不到本機資料操作", 404);
+}
+
+function emptyStore() {
+  return {
+    version: STORE_VERSION,
+    systems: [],
+    engineers: [],
+    tasks: [],
+    history: []
+  };
+}
+
+let databasePromise = null;
+let backupFileHandle = null;
+
+async function initializeStorage() {
+  backupFileHandle = await readBackupFileHandle();
+  state.backupFileLinked = Boolean(backupFileHandle);
+  await readStore();
+}
+
+async function readStore() {
+  const stored = await readRecord(STORE_RECORD_KEY);
+
+  if (stored) {
+    return normalizeStoreShape(stored);
+  }
+
+  const migrated = readLegacyLocalStorage();
+  if (migrated) {
+    await writeStore(migrated);
+    return migrated;
+  }
+
+  const store = emptyStore();
+  await writeStore(store);
+  return store;
+}
+
+async function writeStore(store) {
+  const normalized = normalizeStoreShape(store);
+  await writeRecord(STORE_RECORD_KEY, normalized);
+  await writeLinkedBackupFile(normalized);
+  return normalized;
+}
+
+function readLegacyLocalStorage() {
+  try {
+    const raw = window.localStorage?.getItem(LEGACY_STORE_KEY);
+    return raw ? normalizeStoreShape(JSON.parse(raw)) : null;
+  } catch (error) {
+    throw new Error(`舊版本機資料讀取失敗：${error.message}`);
+  }
+}
+
+function openDatabase() {
+  if (!window.indexedDB) {
+    throw new Error("目前瀏覽器不支援 IndexedDB，無法保存資料");
+  }
+
+  if (!databasePromise) {
+    databasePromise = new Promise((resolve, reject) => {
+      const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(DB_STORE)) {
+          database.createObjectStore(DB_STORE, { keyPath: "key" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("IndexedDB 開啟失敗"));
+      request.onblocked = () => reject(new Error("IndexedDB 正被其他分頁佔用，請關閉其他分頁後重試"));
+    });
+  }
+
+  return databasePromise;
+}
+
+async function readRecord(key) {
+  const database = await openDatabase();
+  const transaction = database.transaction(DB_STORE, "readonly");
+  const store = transaction.objectStore(DB_STORE);
+  const record = await requestToPromise(store.get(key));
+  return record?.value ?? null;
+}
+
+async function writeRecord(key, value) {
+  const database = await openDatabase();
+  const transaction = database.transaction(DB_STORE, "readwrite");
+  const store = transaction.objectStore(DB_STORE);
+  await requestToPromise(store.put({ key, value }));
+  await transactionToPromise(transaction);
+}
+
+function requestToPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB 操作失敗"));
+  });
+}
+
+function transactionToPromise(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB 交易失敗"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB 交易已取消"));
+  });
+}
+
+function supportsFileBackups() {
+  return typeof window.showSaveFilePicker === "function";
+}
+
+async function chooseBackupFile() {
+  if (!supportsFileBackups()) {
+    throw new Error("目前瀏覽器不支援自動寫入本機備份檔");
+  }
+
+  const handle = await window.showSaveFilePicker({
+    suggestedName: `mis-manager-backup-${today()}.json`,
+    types: [
+      {
+        description: "JSON backup",
+        accept: { "application/json": [".json"] }
+      }
+    ]
+  });
+
+  await writeBackupFile(await readStore(), handle);
+  backupFileHandle = handle;
+  state.backupFileLinked = true;
+  await writeRecord(BACKUP_HANDLE_KEY, handle);
+}
+
+async function readBackupFileHandle() {
+  if (!supportsFileBackups()) {
+    return null;
+  }
+
+  try {
+    return await readRecord(BACKUP_HANDLE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+async function writeLinkedBackupFile(store) {
+  if (!backupFileHandle) {
+    return;
+  }
+
+  try {
+    await writeBackupFile(store, backupFileHandle);
+  } catch (error) {
+    console.warn("本機備份檔寫入失敗", error);
+    backupFileHandle = null;
+    state.backupFileLinked = false;
+    await writeRecord(BACKUP_HANDLE_KEY, null);
+  }
+}
+
+async function writeBackupFile(store, handle) {
+  if (typeof handle.queryPermission === "function") {
+    const permission = await handle.queryPermission({ mode: "readwrite" });
+    if (permission !== "granted") {
+      const requested = await handle.requestPermission({ mode: "readwrite" });
+      if (requested !== "granted") {
+        throw new Error("未取得本機備份檔寫入權限");
+      }
+    }
+  }
+
+  const writable = await handle.createWritable();
+  await writable.write(`${JSON.stringify(normalizeStoreShape(store), null, 2)}\n`);
+  await writable.close();
+}
+
+function normalizeStoreShape(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw createInputError("匯入資料必須是 JSON 物件");
+  }
+
+  const systems = readArray(raw.systems, "systems").map(normalizeSystemRecord);
+  const engineers = readArray(raw.engineers, "engineers").map(normalizeEngineerRecord);
+  const tasks = readArray(raw.tasks, "tasks").map(normalizeTaskRecord);
+  const history = readArray(raw.history, "history").map(normalizeHistoryRecord);
+
+  assertUniqueIds(systems, "systems");
+  assertUniqueIds(engineers, "engineers");
+  assertUniqueIds(tasks, "tasks");
+
+  const systemIds = new Set(systems.map((item) => item.id));
+  const engineerIds = new Set(engineers.map((item) => item.id));
+  const taskIds = new Set(tasks.map((item) => item.id));
+
+  for (const task of tasks) {
+    if (!systemIds.has(task.systemId)) {
+      throw createInputError(`代辦「${task.title}」參照不存在的系統`);
+    }
+
+    if (!engineerIds.has(task.engineerId)) {
+      throw createInputError(`代辦「${task.title}」參照不存在的工程師`);
+    }
+  }
+
+  for (const entry of history) {
+    if (!taskIds.has(entry.taskId)) {
+      throw createInputError("歷程紀錄參照不存在的代辦");
+    }
+  }
+
+  return {
+    version: STORE_VERSION,
+    systems,
+    engineers,
+    tasks,
+    history
+  };
+}
+
+function createSystem(store, input) {
+  const timestamp = toIso();
+  const system = {
+    id: createId("sys"),
+    name: readText(input.name, "系統名稱", { required: true, max: 80 }),
+    description: readText(input.description, "系統描述", { max: 400 }),
+    active: readBoolean(input.active, true),
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+
+  return {
+    store: {
+      ...store,
+      systems: [...store.systems, system]
+    },
+    item: system
+  };
+}
+
+function updateSystem(store, id, input) {
+  const index = findIndexById(store.systems, id, "系統");
+  const current = store.systems[index];
+  const next = {
+    ...current,
+    name: input.name === undefined ? current.name : readText(input.name, "系統名稱", { required: true, max: 80 }),
+    description:
+      input.description === undefined
+        ? current.description
+        : readText(input.description, "系統描述", { max: 400 }),
+    active: input.active === undefined ? current.active : readBoolean(input.active, current.active),
+    updatedAt: toIso()
+  };
+
+  return replaceAt(store, "systems", index, next);
+}
+
+function createEngineer(store, input) {
+  const timestamp = toIso();
+  const engineer = {
+    id: createId("eng"),
+    name: readText(input.name, "工程師姓名", { required: true, max: 80 }),
+    contact: readText(input.contact, "聯絡資訊", { max: 160 }),
+    active: readBoolean(input.active, true),
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+
+  return {
+    store: {
+      ...store,
+      engineers: [...store.engineers, engineer]
+    },
+    item: engineer
+  };
+}
+
+function updateEngineer(store, id, input) {
+  const index = findIndexById(store.engineers, id, "工程師");
+  const current = store.engineers[index];
+  const next = {
+    ...current,
+    name: input.name === undefined ? current.name : readText(input.name, "工程師姓名", { required: true, max: 80 }),
+    contact: input.contact === undefined ? current.contact : readText(input.contact, "聯絡資訊", { max: 160 }),
+    active: input.active === undefined ? current.active : readBoolean(input.active, current.active),
+    updatedAt: toIso()
+  };
+
+  return replaceAt(store, "engineers", index, next);
+}
+
+function createTask(store, input) {
+  const timestamp = toIso();
+  const systemId = readText(input.systemId, "所屬系統", { required: true, max: 80 });
+  const engineerId = readText(input.engineerId, "指派工程師", { required: true, max: 80 });
+  assertActiveReference(store.systems, systemId, "系統");
+  assertActiveReference(store.engineers, engineerId, "工程師");
+
+  const status = input.status === undefined ? "待處理" : readStatus(input.status);
+  const task = {
+    id: createId("task"),
+    title: readText(input.title, "代辦事項", { required: true, max: 160 }),
+    notes: readText(input.notes, "備註", { max: 2000 }),
+    systemId,
+    engineerId,
+    status,
+    priority: input.priority === undefined ? "中" : readPriority(input.priority),
+    dueDate: readDateOnly(input.dueDate, "期限"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    completedAt: status === "已完成" ? timestamp : null
+  };
+
+  return {
+    store: {
+      ...store,
+      tasks: [...store.tasks, task]
+    },
+    item: task
+  };
+}
+
+function updateTask(store, id, input) {
+  const index = findIndexById(store.tasks, id, "代辦");
+  const current = store.tasks[index];
+  const timestamp = toIso();
+  const nextSystemId =
+    input.systemId === undefined ? current.systemId : readText(input.systemId, "所屬系統", { required: true, max: 80 });
+  const nextEngineerId =
+    input.engineerId === undefined
+      ? current.engineerId
+      : readText(input.engineerId, "指派工程師", { required: true, max: 80 });
+
+  if (nextSystemId !== current.systemId) {
+    assertActiveReference(store.systems, nextSystemId, "系統");
+  }
+
+  if (nextEngineerId !== current.engineerId) {
+    assertActiveReference(store.engineers, nextEngineerId, "工程師");
+  }
+
+  const nextStatus = input.status === undefined ? current.status : readStatus(input.status);
+  const next = {
+    ...current,
+    title: input.title === undefined ? current.title : readText(input.title, "代辦事項", { required: true, max: 160 }),
+    notes: input.notes === undefined ? current.notes : readText(input.notes, "備註", { max: 2000 }),
+    systemId: nextSystemId,
+    engineerId: nextEngineerId,
+    status: nextStatus,
+    priority: input.priority === undefined ? current.priority : readPriority(input.priority),
+    dueDate: input.dueDate === undefined ? current.dueDate : readDateOnly(input.dueDate, "期限"),
+    updatedAt: timestamp,
+    completedAt: resolveCompletedAt(current, nextStatus, timestamp)
+  };
+  const history = buildHistoryEntries(current, next, timestamp);
+
+  return {
+    store: {
+      ...store,
+      tasks: store.tasks.map((task, taskIndex) => (taskIndex === index ? next : task)),
+      history: [...store.history, ...history]
+    },
+    item: next,
+    history
+  };
+}
+
+function batchUpdateTaskStatus(store, ids, status) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw createInputError("請至少選取一筆代辦");
+  }
+
+  const nextStatus = readStatus(status);
+  const idSet = new Set(ids.map((id) => readText(id, "代辦 ID", { required: true, max: 80 })));
+  const missing = [...idSet].filter((id) => !store.tasks.some((task) => task.id === id));
+
+  if (missing.length > 0) {
+    throw createInputError(`找不到代辦：${missing.join(", ")}`, 404);
+  }
+
+  const timestamp = toIso();
+  const history = [];
+  let changed = 0;
+
+  const tasks = store.tasks.map((task) => {
+    if (!idSet.has(task.id) || task.status === nextStatus) {
+      return task;
+    }
+
+    changed += 1;
+    const next = {
+      ...task,
+      status: nextStatus,
+      updatedAt: timestamp,
+      completedAt: resolveCompletedAt(task, nextStatus, timestamp)
+    };
+    history.push(createHistoryEntry(task.id, "status", task.status, nextStatus, timestamp));
+    return next;
+  });
+
+  return {
+    store: {
+      ...store,
+      tasks,
+      history: [...store.history, ...history]
+    },
+    changed,
+    history
+  };
+}
+
+function enrichTask(task, store) {
+  const system = store.systems.find((item) => item.id === task.systemId);
+  const engineer = store.engineers.find((item) => item.id === task.engineerId);
+
+  return {
+    ...task,
+    systemName: system?.name ?? "已移除系統",
+    engineerName: engineer?.name ?? "已移除工程師",
+    overdue: isOverdue(task)
+  };
+}
+
+function buildHistoryEntries(before, after, timestamp) {
+  return HISTORY_FIELDS.flatMap((field) => {
+    if (before[field] === after[field]) {
+      return [];
+    }
+
+    return [createHistoryEntry(after.id, field, before[field] ?? "", after[field] ?? "", timestamp)];
+  });
+}
+
+function createHistoryEntry(taskId, field, before, after, timestamp) {
+  return {
+    id: createId("hist"),
+    taskId,
+    field,
+    before,
+    after,
+    changedAt: timestamp,
+    actor: "local"
+  };
+}
+
+function resolveCompletedAt(current, nextStatus, timestamp) {
+  if (nextStatus === "已完成") {
+    return current.status === "已完成" ? current.completedAt ?? timestamp : timestamp;
+  }
+
+  return null;
+}
+
+function replaceAt(store, key, index, item) {
+  return {
+    store: {
+      ...store,
+      [key]: store[key].map((current, currentIndex) => (currentIndex === index ? item : current))
+    },
+    item
+  };
+}
+
+function assertActiveReference(records, id, label) {
+  const record = records.find((item) => item.id === id);
+
+  if (!record) {
+    throw createInputError(`找不到${label}`);
+  }
+
+  if (!record.active) {
+    throw createInputError(`${label}已停用，不能用於新的指派`);
+  }
+}
+
+function findIndexById(records, id, label) {
+  const index = records.findIndex((item) => item.id === id);
+
+  if (index === -1) {
+    throw createInputError(`找不到${label}`, 404);
+  }
+
+  return index;
+}
+
+function normalizeSystemRecord(record) {
+  return {
+    id: readText(record?.id, "系統 ID", { required: true, max: 80 }),
+    name: readText(record?.name, "系統名稱", { required: true, max: 80 }),
+    description: readText(record?.description, "系統描述", { max: 400 }),
+    active: readBoolean(record?.active, true),
+    createdAt: readText(record?.createdAt, "建立時間", { max: 40 }),
+    updatedAt: readText(record?.updatedAt, "更新時間", { max: 40 })
+  };
+}
+
+function normalizeEngineerRecord(record) {
+  return {
+    id: readText(record?.id, "工程師 ID", { required: true, max: 80 }),
+    name: readText(record?.name, "工程師姓名", { required: true, max: 80 }),
+    contact: readText(record?.contact, "聯絡資訊", { max: 160 }),
+    active: readBoolean(record?.active, true),
+    createdAt: readText(record?.createdAt, "建立時間", { max: 40 }),
+    updatedAt: readText(record?.updatedAt, "更新時間", { max: 40 })
+  };
+}
+
+function normalizeTaskRecord(record) {
+  return {
+    id: readText(record?.id, "代辦 ID", { required: true, max: 80 }),
+    title: readText(record?.title, "代辦事項", { required: true, max: 160 }),
+    notes: readText(record?.notes, "備註", { max: 2000 }),
+    systemId: readText(record?.systemId, "所屬系統", { required: true, max: 80 }),
+    engineerId: readText(record?.engineerId, "指派工程師", { required: true, max: 80 }),
+    status: readStatus(record?.status),
+    priority: readPriority(record?.priority),
+    dueDate: readDateOnly(record?.dueDate, "期限"),
+    createdAt: readText(record?.createdAt, "建立時間", { max: 40 }),
+    updatedAt: readText(record?.updatedAt, "更新時間", { max: 40 }),
+    completedAt: record?.completedAt === null ? null : readText(record?.completedAt, "完成時間", { max: 40 })
+  };
+}
+
+function normalizeHistoryRecord(record) {
+  const field = readText(record?.field, "歷程欄位", { required: true, max: 40 });
+
+  if (!HISTORY_FIELDS.includes(field)) {
+    throw createInputError("歷程欄位不合法");
+  }
+
+  return {
+    id: readText(record?.id, "歷程 ID", { required: true, max: 80 }),
+    taskId: readText(record?.taskId, "代辦 ID", { required: true, max: 80 }),
+    field,
+    before: readText(String(record?.before ?? ""), "變更前", { max: 200 }),
+    after: readText(String(record?.after ?? ""), "變更後", { max: 200 }),
+    changedAt: readText(record?.changedAt, "變更時間", { required: true, max: 40 }),
+    actor: readText(record?.actor, "變更者", { max: 40 }) || "local"
+  };
+}
+
+function readText(value, label, options = {}) {
+  const { required = false, max = 500 } = options;
+  const text = typeof value === "string" ? value.trim() : "";
+
+  if (required && text.length === 0) {
+    throw createInputError(`${label}為必填`);
+  }
+
+  if (text.length > max) {
+    throw createInputError(`${label}不可超過 ${max} 個字`);
+  }
+
+  return text;
+}
+
+function readBoolean(value, fallback) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  return value === true || value === "true" || value === "on";
+}
+
+function readStatus(value) {
+  const status = readText(value, "狀態", { required: true, max: 20 });
+
+  if (!STATUS_OPTIONS.includes(status)) {
+    throw createInputError("狀態不合法");
+  }
+
+  return status;
+}
+
+function readPriority(value) {
+  const priority = readText(value, "優先級", { required: true, max: 20 });
+
+  if (!PRIORITY_OPTIONS.includes(priority)) {
+    throw createInputError("優先級不合法");
+  }
+
+  return priority;
+}
+
+function readDateOnly(value, label) {
+  const text = readText(value, label, { required: true, max: 10 });
+
+  if (!isValidDateOnly(text)) {
+    throw createInputError(`${label}格式必須為 YYYY-MM-DD`);
+  }
+
+  return text;
+}
+
+function readArray(value, label) {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw createInputError(`${label} 必須是陣列`);
+  }
+
+  return value;
+}
+
+function assertUniqueIds(records, label) {
+  const ids = new Set();
+
+  for (const record of records) {
+    if (ids.has(record.id)) {
+      throw createInputError(`${label} 含有重複 ID`);
+    }
+
+    ids.add(record.id);
+  }
+}
+
+function isValidDateOnly(value) {
+  if (typeof value !== "string" || !DATE_ONLY_RE.test(value)) {
+    return false;
+  }
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function toIso() {
+  return new Date().toISOString();
+}
+
+function createId(prefix) {
+  const randomPart =
+    window.crypto?.randomUUID?.() ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${prefix}-${randomPart}`;
+}
+
+function createInputError(message, status = 400) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
 }
 
 function visibleTasks() {
