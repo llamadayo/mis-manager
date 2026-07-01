@@ -104,10 +104,11 @@ function renderSidebar() {
   return `
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">MIS</div>
+        <div class="brand-mark">
+          <img src="./assets/mis-task-icon.png" alt="" aria-hidden="true">
+        </div>
         <div>
           <p class="brand-title">MIS 代辦管理</p>
-          <p class="brand-subtitle">Local task console</p>
         </div>
       </div>
       <nav class="nav" aria-label="主導覽">
@@ -164,7 +165,6 @@ function renderOverview() {
       <header class="page-header">
         <div>
           <h1 class="page-title">待辦總覽</h1>
-          <p class="page-description">依系統、工程師、狀態與期限追蹤待辦時效。</p>
         </div>
       </header>
       <div class="panel toolbar" role="search">
@@ -409,9 +409,19 @@ function renderManagementView(config) {
               <label for="entityContact">${config.contactLabel}</label>
               <textarea class="textarea" id="entityContact" name="${config.contactName}" maxlength="400">${escapeHtml(config.contactValue)}</textarea>
             </div>
-            <label class="inline-check form-field full">
-              <input class="checkbox" name="active" type="checkbox" ${config.active ? "checked" : ""}>
-              啟用
+            <label class="toggle-card form-field full">
+              <input class="toggle-input" name="active" type="checkbox" ${config.active ? "checked" : ""}>
+              <span class="toggle-text">
+                <span class="toggle-title">狀態</span>
+                <span class="toggle-note">啟用後會出現在新的代辦選單。</span>
+              </span>
+              <span class="toggle-control" aria-hidden="true">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-value">
+                  <span class="toggle-on">啟用</span>
+                  <span class="toggle-off">停用</span>
+                </span>
+              </span>
             </label>
             <div class="form-field full">
               <div class="button-row">
@@ -440,7 +450,7 @@ function renderSettingsView() {
       <header class="page-header">
         <div>
           <h1 class="page-title">設定</h1>
-          <p class="page-description">備份、還原與本機資料資訊。</p>
+          <p class="page-description">資料保存在瀏覽器 IndexedDB；清除網站資料前請先匯出 JSON 或連結本機備份檔。</p>
         </div>
       </header>
       <div class="settings-grid">
@@ -471,10 +481,6 @@ function renderSettingsView() {
           <p class="detail-empty">${state.backupFileLinked ? "已連結本機備份檔。若瀏覽器資料遺失，可用該 JSON 檔重新匯入。" : "尚未連結自動備份檔。"}</p>
         </section>
       </div>
-      <section class="panel settings-panel">
-        <h2>本機安全邊界</h2>
-        <p class="detail-empty">本模式不連線、不開 server。主要資料存在目前瀏覽器的 IndexedDB；清除網站資料仍可能刪除資料，請使用 JSON 匯出或本機備份檔保留可重新匯入的副本。</p>
-      </section>
     </section>
   `;
 }

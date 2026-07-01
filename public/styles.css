@@ -93,27 +93,26 @@ button {
 }
 
 .brand-mark {
-  display: grid;
+  display: block;
+  overflow: hidden;
   width: 38px;
   height: 38px;
-  place-items: center;
   border: 1px solid rgba(255, 138, 31, 0.5);
   border-radius: 8px;
-  background: linear-gradient(135deg, rgba(255, 138, 31, 0.28), rgba(255, 177, 95, 0.08));
-  color: var(--accent-strong);
-  font-weight: 800;
+  background: #050505;
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .brand-title {
   margin: 0;
   font-size: 16px;
   font-weight: 800;
-}
-
-.brand-subtitle {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .nav {
@@ -330,6 +329,20 @@ button {
   font-weight: 800;
 }
 
+.batch-bar .button-row {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.batch-bar .select {
+  width: auto;
+  min-width: 180px;
+}
+
+.batch-bar .button {
+  white-space: nowrap;
+}
+
 .table-wrap {
   max-width: 100%;
   min-width: 0;
@@ -535,8 +548,7 @@ button {
 }
 
 .form-panel,
-.list-panel,
-.settings-panel {
+.list-panel {
   padding: 16px;
 }
 
@@ -550,11 +562,107 @@ button {
   grid-column: 1 / -1;
 }
 
-.inline-check {
-  display: flex;
+.toggle-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
   align-items: center;
-  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(52, 48, 43, 0.9);
+  border-radius: var(--radius);
+  background: #0d0d0d;
+  cursor: pointer;
+}
+
+.toggle-card:hover {
+  border-color: var(--accent-border);
+  background: #12100e;
+}
+
+.toggle-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.toggle-input:focus-visible ~ .toggle-control .toggle-track {
+  box-shadow: 0 0 0 3px var(--accent-focus);
+}
+
+.toggle-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.toggle-title {
   color: var(--text);
+  font-weight: 800;
+}
+
+.toggle-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.toggle-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.toggle-track {
+  position: relative;
+  width: 48px;
+  height: 26px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: #191511;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 160ms ease, background 160ms ease;
+}
+
+.toggle-input:checked ~ .toggle-control {
+  color: var(--accent-strong);
+}
+
+.toggle-input:checked ~ .toggle-control .toggle-track {
+  border-color: rgba(255, 138, 31, 0.72);
+  background: rgba(255, 138, 31, 0.28);
+}
+
+.toggle-input:checked ~ .toggle-control .toggle-thumb {
+  transform: translateX(22px);
+  background: var(--accent);
+}
+
+.toggle-off {
+  display: inline;
+}
+
+.toggle-on,
+.toggle-input:checked ~ .toggle-control .toggle-off {
+  display: none;
+}
+
+.toggle-input:checked ~ .toggle-control .toggle-on {
+  display: inline;
 }
 
 .empty-state {
@@ -746,5 +854,10 @@ button {
   .batch-bar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .batch-bar .button-row {
+    overflow-x: auto;
+    padding-bottom: 2px;
   }
 }
