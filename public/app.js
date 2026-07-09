@@ -105,7 +105,7 @@ function renderSidebar() {
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">
-          <img src="./assets/mis-task-icon.png" alt="" aria-hidden="true">
+          <img src="public/assets/mis-task-icon.png" alt="" aria-hidden="true">
         </div>
         <div>
           <p class="brand-title">MIS 代辦管理</p>
